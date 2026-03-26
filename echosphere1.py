@@ -6,7 +6,11 @@ from fastapi import FastAPI, UploadFile, File, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi import Request, UploadFile, File, Header
 from fastapi import FastAPI, Request
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from fastapi import Header
 
 
 
@@ -19,6 +23,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
 
 API_KEY = "sk_test_123456789"
+
 
 SUPPORTED_LANG_MAP = {
     "ta": "Tamil",
@@ -446,9 +451,11 @@ def classify_voice(f: dict):
             explanation = "mixed signals: " + ", ".join(triggers[:2])
         else:
             explanation = ", ".join(human_cues[:2]) if human_cues else "Natural human speech variation detected"
-
-    # Return format unchanged: (classification, confidence, explanation, ai_score, triggers)
-    # ai_score should reflect the calibrated score (better for evaluation + consistency)
+            
+        print(f"[DEBUG] aiScore={calibrated_ai:.3f}, triggers={triggers}")
+        
+    #   Return format unchanged: (classification, confidence, explanation, ai_score, triggers)
+    #   ai_score should reflect the calibrated score (better for evaluation + consistency)
     return classification, float(confidence), explanation, float(round(calibrated_ai, 3)), triggers
 
 
@@ -561,7 +568,7 @@ async function run(){
   const b64=await toB64(f);
 
   const payload={
-    language:"Tamil",
+    language:"auto",
     audioFormat:"mp3",
     audioBase64:b64
   };
@@ -618,133 +625,153 @@ def favicon():
 def api_health():
     return {"status": "ok", "service": "ai-voice-detection", "version": "1.0"}
 
-
-# =========================================================
-# ✅ FILE UPLOAD ENDPOINT (MULTIPART FORM)
-# =========================================================
 @app.post("/api/voice-detection-file")
 async def voice_detection_file(
     file: UploadFile = File(...),
-    x_api_key: str = Header(default=""),
+    x_api_key: str = Header(None, alias="x-api-key")
 ):
-    def error(status_code=401, msg="Invalid API key or malformed request"):
+    # ---------- AUTH ----------
+    if (x_api_key or "").strip() != (API_KEY or "").strip():
         return JSONResponse(
-            status_code=status_code,
-            content={"status": "error", "message": msg},
+            status_code=401,
+            content={"status": "error", "message": "Invalid API key or malformed request"}
         )
 
-    if x_api_key != API_KEY:
-        return error(401, "Invalid API key")
-
+    # ---------- FILE VALIDATION ----------
     if not file or not file.filename:
-        return error(400, "No file uploaded")
+        return JSONResponse(
+            status_code=422,
+            content={"status": "error", "message": "Field required: file"}
+        )
 
     ext = os.path.splitext(file.filename.lower())[1]
     if ext not in [".mp3", ".wav", ".m4a", ".aac", ".ogg"]:
-        return error(400, "Unsupported audio type. Upload mp3/wav/m4a/aac/ogg")
-
-    path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}{ext}")
-
-    try:
-        data = await file.read()
-        if not data or len(data) < 2000:
-            return error(400, "Audio file looks empty or too small")
-
-        with open(path, "wb") as f:
-            f.write(data)
-
-        detected_lang = detect_language_from_audio(path)
-        feats = extract_features(path)
-        classification, confidence, explanation, ai_score, triggers = classify_voice(feats)
-
-        return {
-            "status": "success",
-            "language": detected_lang if detected_lang in ALLOWED_LANGUAGES else "Unknown",
-            "classification": classification,
-            "confidenceScore": float(confidence),
-            "aiScore": round(float(ai_score), 3),
-            "triggers": triggers,
-            "explanation": explanation,
-            "fileName": file.filename,
-            "savedAs": os.path.basename(path),
-            "features": feats,
-        }
-    except Exception:
-        return error(500, "Server error while processing audio")
-
-
-# =========================================================
-# EVALUATION API (BASE64 + API KEY)
-# =========================================================
-@app.post("/api/voice-detection")
-async def voice_api(req: Request):
-    def error():
         return JSONResponse(
-            status_code=401,
-            content={"status": "error", "message": "Invalid API key or malformed request"},
+            status_code=422,
+            content={"status": "error", "message": "Unsupported audio type"}
         )
 
-    if req.headers.get("x-api-key") != API_KEY:
-        return error()
+    # ---------- SAVE ----------
+    path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}{ext}")
+    data = await file.read()
+    if not data or len(data) < 2000:
+        return JSONResponse(
+            status_code=422,
+            content={"status": "error", "message": "Audio file too small or empty"}
+        )
 
+    with open(path, "wb") as f:
+        f.write(data)
+
+    # ---------- ANALYZE ----------
     try:
-        body = await req.json()
-
-        language_in = body.get("language")
-        audio_format = body.get("audioFormat")
-        audio_b64 = body.get("audioBase64")
-
-        if audio_format != "mp3":
-            return error()
-        if not isinstance(audio_b64, str) or len(audio_b64) < 20:
-            return error()
-        if not isinstance(language_in, str) or len(language_in) < 2:
-            return error()
-
-        mp3_bytes = base64.b64decode(audio_b64, validate=True)
-
-        path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.mp3")
-        with open(path, "wb") as f:
-            f.write(mp3_bytes)
-
         detected_lang = detect_language_from_audio(path)
-
         feats = extract_features(path)
-        classification, confidence, explanation, ai_score, triggers = classify_voice(feats)
+        classification, confidence, explanation, _, _ = classify_voice(feats)
 
+        # STRICT format (same as evaluator)
         return {
             "status": "success",
             "language": detected_lang if detected_lang in ALLOWED_LANGUAGES else "Unknown",
             "classification": classification,
             "confidenceScore": float(confidence),
-            "aiScore": round(float(ai_score), 3),
-            "triggers": triggers,
             "explanation": explanation,
-            "features": feats,
         }
-    except (binascii.Error, ValueError):
-        return error()
     except Exception:
-        return error()
+        return JSONResponse(
+            status_code=422,
+            content={"status": "error", "message": "Invalid or unsupported audio"}
+        )
 
 
+# =========================================================
+# ✅ EVALUATION API (BASE64 + API KEY)  — SINGLE SOURCE OF TRUTH
+# =========================================================
+@app.post("/api/voice-detection")
+async def voice_detection(
+    payload: dict,
+    x_api_key: str = Header(None, alias="x-api-key")
+):
+          # ---------- AUTH ----------
+    sent = (x_api_key or "").strip()
+    expected = (API_KEY or "").strip()
+    if sent != expected:
+        return JSONResponse(
+            status_code=401,
+            content={"status": "error", "message": "Invalid API key or malformed request"}
+        )
+
+    # ---------- REQUIRED FIELDS ----------
+    # ---------- REQUIRED FIELDS ----------
+    language_in = (payload.get("language") or "").strip()
+    audio_format = (payload.get("audioFormat") or "").strip().lower()
+    audio_b64 = payload.get("audioBase64")
+    
+# ✅ PATCH: allow missing/empty/auto language
+    if (not language_in) or (language_in.lower() in ["auto", "auto-detect", "autodetect"]):
+       language_in = "auto"
+       
+    if not language_in or not audio_format or not audio_b64:
+       return JSONResponse(
+         status_code=400,
+         content={"status": "error", "message": "Missing required fields"}
+       )
+
+    if audio_format != "mp3":
+       return JSONResponse(
+          status_code=400,
+          content={"status": "error", "message": "audioFormat must be mp3"}
+       )
+
+# ---------- BASE64 → FILE ----------
+    try:
+      mp3_bytes = base64.b64decode(audio_b64, validate=True)
+    except (binascii.Error, ValueError):
+      return JSONResponse(
+         status_code=422,
+         content={"status": "error", "message": "Invalid audioBase64"}
+      )
+
+    path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.mp3")
+    with open(path, "wb") as f:
+         f.write(mp3_bytes)
+
+# ---------- ANALYSIS ----------
+    try:
+        detected_lang = detect_language_from_audio(path)
+        feats = extract_features(path)
+        classification, confidence, explanation, _, _ = classify_voice(feats)
+
+        return {
+           "status": "success",
+           "language": detected_lang if detected_lang in ALLOWED_LANGUAGES else "Unknown",
+           "classification": classification,
+            "confidenceScore": float(confidence),
+            "explanation": explanation,
+        }
+    except Exception:
+        return JSONResponse(
+           status_code=422,
+           content={"status": "error", "message": "Invalid or unsupported mp3 audio"}
+       )
+    
 # =========================================================
 # RUN
 # =========================================================
-if __name__ == "__main__":
-    import uvicorn
-    import webbrowser
-    import threading
-    import time
+#if __name__ == "__main__":
+#    import uvicorn
+#    import webbrowser
+#    import threading
+#    import time
 
-    HOST = "127.0.0.1"
-    PORT = 8090
-    URL = f"http://{HOST}:{PORT}"
+#    HOST = "127.0.0.1"
+#    PORT = 8090
+#    uvicorn.run(app, host=HOST, port=PORT)
 
-    def open_browser():
-        time.sleep(1.5)  # wait for server to start
-        webbrowser.open(URL)
+#    def open_browser():
+#        time.sleep(1.5)  # wait for server to start
+#        webbrowser.open(URL)
 
-    threading.Thread(target=open_browser, daemon=True).start()
+#    threading.Thread(target=open_browser, daemon=True).start()
 
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+#    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
