@@ -97,7 +97,7 @@ This project addresses:
 - **API Security:** API Key validation
 
 ## ⚙️ How to Run
-python -m uvicorn beauty_ecosystem_unified_v8_optionB_logo_live_fixed:app --reload
+python -m uvicorn ezhilsigai:app --reload
 pip install fastapi uvicorn scikit-learn requests pillow opencv-python numpy
 
 
